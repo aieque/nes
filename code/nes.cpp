@@ -1,83 +1,90 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <string.h>
+#include "nes.h"
 
-typedef uint8_t u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef uint64_t u64; // Not even sure if this will be needed.
+global platform *Platform;
+global core *Core;
 
-typedef int8_t i8;
-typedef int16_t i16;
-typedef int32_t i32;
-typedef int64_t i64;
+#include "memory.cpp"
 
-typedef i8 b8;
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include "opengl.h"
 
-#define internal static
-#define global static
-#define local_persist static
+#include "renderer_opengl.cpp"
+#include "imgui.cpp"
 
-struct Nes;
-global Nes *nes;
-
-u8 read_byte(u16 address);
-void write_byte(u16 address, u8 value);
-
-#include "cart.cpp"
-#include "cpu.h"
-
-struct Nes {
-    Cartridge cart;
-    Cpu cpu;
-    
-    u8 internal_ram[0x800];
-};
-
-#include "mapper.cpp"
+#include "cartridge.cpp"
+#include "mmu.cpp"
 #include "cpu.cpp"
 
-u8 read_byte(u16 address) {
-    if (address >= 0x0000 && address <= 0x1FFF) {
-        return nes->internal_ram[address & 0x7FF];
-    }
+APP_EXPORT void
+AppHotLoad(platform *_Platform) {
+    Platform = _Platform;
+    Core = (core *)Platform->PermanentArena.Base;
     
-    // @TODO: Actually read the mapper.
-    if (address >= 0x4020 && address <= 0xFFFF) {
-        return mapper_00_read(address);
-    }
-    
-    printf("[nes]: trying to read at invalid address %x.\n", address);
-    return -1;
+    LoadOpenGLProcedures();
 }
 
-void write_byte(u16 address, u8 value) {
-    if (address >= 0x0000 && address <= 0x1FFF) {
-        nes->internal_ram[address & 0x7FF] = value;
+APP_EXPORT void
+AppUpdate(platform *_Platform) {
+    if (!Platform->IsInitialized) {
+        Platform->PermanentArena = InitializeMemoryArena();
+        Platform->ScratchArena = InitializeMemoryArena();
+        
+        Core = (core *)Platform->PermanentArena.Base;
+        MemoryArenaPushZero(&Platform->PermanentArena, sizeof(core));
+        
+        Core->PermanentArena = &Platform->PermanentArena;
+        Core->ScratchArena = &Platform->ScratchArena;
+        
+        Renderer_Init(&Core->Renderer, Core->PermanentArena, Megabytes(12));
+        
+        UI_DefaultStyle(&Core->UI.Style, LoadFont(Core->PermanentArena, "assets/fonts/ProggyClean.ttf", 16, 1, 1));
+        
+        Core->NES.MMU.Cartridge = &Core->NES.Cartridge;
+        
+        LoadCartridge("ice.nes", &Core->NES.Cartridge, Core->PermanentArena);
+        ResetCPU(&Core->NES.CPU, &Core->NES.MMU);
+        
+        Platform->IsInitialized = true;
     }
     
-    printf("[nes]: trying to write to invalid address %x.\n", address);
+    if (IsKeyPressed(Key_F3)) {
+        Platform->ToggleFullscreen();
+    }
+    
+    Core->UI.PreviousMousePosition = Core->UI.MousePosition;
+    Core->UI.MousePosition = Platform->MousePosition;
+    Core->UI.LeftMouseDown = IsMouseDown(MouseButton_Left);
+    
+    ClockCPU(&Core->NES.CPU, &Core->NES.MMU);
+    
+    UI_SetupFrame(&Core->UI);
+    
+    ShowCPURegisters(&Core->NES.CPU, &Core->UI);
+    
+    UI_BeginDropdown(&Core->UI, "NES");
+    {
+        UI_Button(&Core->UI, "Reset");
+        
+        UI_AddPadding(&Core->UI, 20);
+        UI_Label(&Core->UI, "Load Rom:");
+        UI_AddPadding(&Core->UI, 5);
+        
+        local_persist char ROMFileBuffer[60];
+        UI_Textbox(&Core->UI, ROMFileBuffer, 60);
+        
+        UI_Button(&Core->UI, "Load");
+    }
+    UI_EndDropdown(&Core->UI);
+    
+    Renderer_BeginFrame(&Core->Renderer, Platform->WindowSize.Width, Platform->WindowSize.Height);
+    
+    UI_RenderUI(&Core->UI, &Core->Renderer);
+    
+    Renderer_EndFrame(&Core->Renderer);
+    
+    Platform->SwapBuffers();
 }
 
-void init_nes() {
-    nes = (Nes *)malloc(sizeof(Nes));
-    
-    load_cartridge("roms/ice_climbers.nes", &nes->cart);
-    reset_cpu(&nes->cpu);
-}
-
-int main(int argument_count, char **arguments) {
-    init_nes();
-    
-    printf("NMI Vector: %x%x\n", read_byte(0xFFFA), read_byte(0xFFFB));
-    printf("Reset Vector: %x%x\n", read_byte(0xFFFC), read_byte(0xFFFD));
-    printf("IRQ Vector: %x%x\n", read_byte(0xFFFE), read_byte(0xFFFF));
-    
-    cycle_cpu();
-    cycle_cpu();
-    cycle_cpu();
-    cycle_cpu();
-    cycle_cpu();
-    
-}
+APP_EXPORT void
+AppQuit() {}
